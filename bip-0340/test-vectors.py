@@ -1,6 +1,14 @@
 import sys
 from reference import *
 
+def is_square(x):
+    return int(pow(x, (p - 1) // 2, p)) == 1
+
+def has_square_y(P):
+    """Determine if P has a square Y coordinate. Used in an earlier draft of BIP340."""
+    assert not is_infinite(P)
+    return is_square(P[1])
+
 def vector0():
     seckey = bytes_from_int(3)
     msg = bytes_from_int(0)
@@ -16,11 +24,18 @@ def vector0():
     assert(y(P) % 2 == 0)
 
     # For historical reasons (pubkey tiebreaker was squareness and not evenness)
-    # we should have at least one test vector where the the point reconstructed
+    # we should have at least one test vector where the point reconstructed
     # from the public key has a square and one where it has a non-square Y
     # coordinate. In this one Y is non-square.
-    pubkey_point = lift_x_even_y(pubkey)
+    pubkey_point = lift_x(int_from_bytes(pubkey))
     assert(not has_square_y(pubkey_point))
+
+    # For historical reasons (R tiebreaker was squareness and not evenness)
+    # we should have at least one test vector where the point reconstructed
+    # from the R.x coordinate has a square and one where it has a non-square Y
+    # coordinate. In this one Y is non-square.
+    R = lift_x(int_from_bytes(sig[0:32]))
+    assert(not has_square_y(R))
 
     return (seckey, pubkey, aux_rand, msg, sig, "TRUE", None)
 
@@ -30,6 +45,11 @@ def vector1():
     aux_rand = bytes_from_int(1)
 
     sig = schnorr_sign(msg, seckey, aux_rand)
+
+    # The point reconstructed from the R.x coordinate has a square Y coordinate.
+    R = lift_x(int_from_bytes(sig[0:32]))
+    assert(has_square_y(R))
+
     return (seckey, pubkey_gen(seckey), aux_rand, msg, sig, "TRUE", None)
 
 def vector2():
@@ -40,13 +60,13 @@ def vector2():
 
     # The point reconstructed from the public key has a square Y coordinate.
     pubkey = pubkey_gen(seckey)
-    pubkey_point = lift_x_even_y(pubkey)
+    pubkey_point = lift_x(int_from_bytes(pubkey))
     assert(has_square_y(pubkey_point))
 
     # This signature vector would not verify if the implementer checked the
-    # squareness of the X coordinate of R instead of the Y coordinate.
-    R = lift_x_square_y(sig[0:32])
-    assert(not is_square(R[0]))
+    # evenness of the X coordinate of R instead of the Y coordinate.
+    R = lift_x(int_from_bytes(sig[0:32]))
+    assert(R[0] % 2 == 1)
 
     return (seckey, pubkey, aux_rand, msg, sig, "TRUE", None)
 
@@ -66,7 +86,7 @@ def vector3():
 
 # Signs with a given nonce. This can be INSECURE and is only INTENDED FOR
 # GENERATING TEST VECTORS. Results in an invalid signature if y(kG) is not
-# square.
+# even.
 def insecure_schnorr_sign_fixed_nonce(msg, seckey0, k):
     if len(msg) != 32:
         raise ValueError('The message must be a 32-byte array.')
@@ -76,12 +96,12 @@ def insecure_schnorr_sign_fixed_nonce(msg, seckey0, k):
     P = point_mul(G, seckey0)
     seckey = seckey0 if has_even_y(P) else n - seckey0
     R = point_mul(G, k)
-    e = int_from_bytes(tagged_hash("BIP340/challenge", bytes_from_point(R) + bytes_from_point(P) + msg)) % n
+    e = int_from_bytes(tagged_hash("BIP0340/challenge", bytes_from_point(R) + bytes_from_point(P) + msg)) % n
     return bytes_from_point(R) + bytes_from_int((k + e * seckey) % n)
 
-# Creates a singature with a small x(R) by using k = 1/2
+# Creates a signature with a small x(R) by using k = -1/2
 def vector4():
-    one_half = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0
+    one_half = n - 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0
     seckey = bytes_from_int(0x763758E5CBEEDEE4F7D3FC86F531C36578933228998226672F13C4F0EBE855EB)
     msg = bytes_from_int(0x4DF3C3F68FCC83B27E9D42C90431A72499F17875C81A599B566C9889B9696703)
     sig = insecure_schnorr_sign_fixed_nonce(msg, seckey, one_half)
@@ -99,22 +119,23 @@ def vector5():
     msg = default_msg
     sig = schnorr_sign(msg, seckey, default_aux_rand)
 
-    pubkey = bytes_from_int(0xEEFDEA4CDB677750A420FEE807EACF21EB9898AE79B9768766E4FAA04A2D4A34)
-    assert(lift_x_even_y(pubkey) is None)
+    pubkey_int = 0xEEFDEA4CDB677750A420FEE807EACF21EB9898AE79B9768766E4FAA04A2D4A34
+    pubkey = bytes_from_int(pubkey_int)
+    assert(lift_x(pubkey_int) is None)
 
     return (None, pubkey, None, msg, sig, "FALSE", "public key not on the curve")
 
 def vector6():
     seckey = default_seckey
     msg = default_msg
-    k = 3
+    k = 6
     sig = insecure_schnorr_sign_fixed_nonce(msg, seckey, k)
 
-    # Y coordinate of R is not a square
+    # Y coordinate of R is not even
     R = point_mul(G, k)
-    assert(not has_square_y(R))
+    assert(not has_even_y(R))
 
-    return (None, pubkey_gen(seckey), None, msg, sig, "FALSE", "has_square_y(R) is false")
+    return (None, pubkey_gen(seckey), None, msg, sig, "FALSE", "has_even_y(R) is false")
 
 def vector7():
     seckey = default_seckey
@@ -147,7 +168,7 @@ def vector9():
     sig = insecure_schnorr_sign_fixed_nonce(msg, seckey, k)
     bytes_from_point.__code__ = bytes_from_point_tmp
 
-    return (None, pubkey_gen(seckey), None, msg, sig, "FALSE", "sG - eP is infinite. Test fails in single verification if has_square_y(inf) is defined as true and x(inf) as 0")
+    return (None, pubkey_gen(seckey), None, msg, sig, "FALSE", "sG - eP is infinite. Test fails in single verification if has_even_y(inf) is defined as true and x(inf) as 0")
 
 def bytes_from_point_inf1(P):
     if P == None:
@@ -166,7 +187,7 @@ def vector10():
     sig = insecure_schnorr_sign_fixed_nonce(msg, seckey, k)
     bytes_from_point.__code__ = bytes_from_point_tmp
 
-    return (None, pubkey_gen(seckey), None, msg, sig, "FALSE", "sG - eP is infinite. Test fails in single verification if has_square_y(inf) is defined as true and x(inf) as 1")
+    return (None, pubkey_gen(seckey), None, msg, sig, "FALSE", "sG - eP is infinite. Test fails in single verification if has_even_y(inf) is defined as true and x(inf) as 1")
 
 # It's cryptographically impossible to create a test vector that fails if run
 # in an implementation which merely misses the check that sig[0:32] is an X
@@ -177,9 +198,9 @@ def vector11():
     sig = schnorr_sign(msg, seckey, default_aux_rand)
 
     # Replace R's X coordinate with an X coordinate that's not on the curve
-    x_not_on_curve = bytes_from_int(0x4A298DACAE57395A15D0795DDBFD1DCB564DA82B0F269BC70A74F8220429BA1D)
-    assert(lift_x_square_y(x_not_on_curve) is None)
-    sig = x_not_on_curve + sig[32:64]
+    x_not_on_curve = 0x4A298DACAE57395A15D0795DDBFD1DCB564DA82B0F269BC70A74F8220429BA1D
+    assert(lift_x(x_not_on_curve) is None)
+    sig = bytes_from_int(x_not_on_curve) + sig[32:64]
 
     return (None, pubkey_gen(seckey), None, msg, sig, "FALSE", "sig[0:32] is not an X coordinate on the curve")
 
@@ -222,12 +243,26 @@ def vector14():
     sig = schnorr_sign(msg, seckey, default_aux_rand)
     pubkey_int = p + 1
     pubkey = bytes_from_int(pubkey_int)
-    assert(lift_x_even_y(pubkey) is None)
+    assert(lift_x(pubkey_int) is None)
     # If an implementation would reduce a given public key modulo p then the
     # pubkey would be valid
-    assert(lift_x_even_y(bytes_from_int(pubkey_int % p)) is not None)
+    assert(lift_x(pubkey_int % p) is not None)
 
     return (None, pubkey, None, msg, sig, "FALSE", "public key is not a valid X coordinate because it exceeds the field size")
+
+def varlen_vector(msg_int):
+    seckey = bytes_from_int(int(16 * "0340", 16))
+    pubkey = pubkey_gen(seckey)
+    aux_rand = bytes_from_int(0)
+    msg = msg_int.to_bytes((msg_int.bit_length() + 7) // 8, "big")
+    sig = schnorr_sign(msg, seckey, aux_rand)
+    comment = "message of size %d (added 2022-12)"
+    return (seckey, pubkey, aux_rand, msg, sig, "TRUE", comment % len(msg))
+
+vector15 = lambda : varlen_vector(0)
+vector16 = lambda : varlen_vector(0x11)
+vector17 = lambda : varlen_vector(0x0102030405060708090A0B0C0D0E0F1011)
+vector18 = lambda : varlen_vector(int(100 * "99", 16))
 
 vectors = [
         vector0(),
@@ -244,7 +279,11 @@ vectors = [
         vector11(),
         vector12(),
         vector13(),
-        vector14()
+        vector14(),
+        vector15(),
+        vector16(),
+        vector17(),
+        vector18(),
     ]
 
 # Converts the byte strings of a test vector into hex strings
